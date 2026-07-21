@@ -1,8 +1,8 @@
 ﻿using System;
-using System.Text;
 using System.Threading.Tasks;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.Ollama;
 
 namespace EnterpriseAI.Core;
 
@@ -12,20 +12,32 @@ class Program
     {
         var builder = Kernel.CreateBuilder();
 
-        // Connect to your local Ollama instance
+        // 1. Connect to Ollama (or OpenAI)
         builder.AddOllamaChatCompletion(
             modelId: "llama3.2",
             endpoint: new Uri("http://localhost:11434")
         );
 
+        // 2. Register our C# Plugin into the Kernel container
+        builder.Plugins.AddFromType<DiagnosticsPlugin>("Diagnostics");
+
         Kernel kernel = builder.Build();
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
 
+        // 3. Configure Execution Settings to allow automatic tool invocation
+        var settings = new OllamaPromptExecutionSettings
+        {
+            // Tells SK: If the LLM requests a tool call, run the C# method automatically and feed the result back!
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
+        };
+
         var history = new ChatHistory();
-        history.AddSystemMessage("You are an elite, concise senior developer assistant.");
+        history.AddSystemMessage("You are an automated DevOps SRE assistant. Use available diagnostic tools to answer user issues.");
 
         Console.ForegroundColor = ConsoleColor.Blue;
-        Console.WriteLine("System: Local Ollama Streaming initialized. Type 'exit' to quit.\n");
+        Console.WriteLine("System: Local Function Calling initialized. Try asking:");
+        Console.WriteLine(" -> 'Check the server metrics for Production'");
+        Console.WriteLine(" -> 'Production CPU is spiking, please restart the OrderProcessor service'\n");
         Console.ResetColor();
 
         while (true)
@@ -44,27 +56,17 @@ class Program
             Console.Write("AI: ");
             Console.ResetColor();
 
-            var fullResponse = new StringBuilder();
+            // Execute request with auto-function calling enabled
+            var response = await chatService.GetChatMessageContentAsync(
+                history,
+                executionSettings: settings,
+                kernel: kernel
+            );
 
-            // 🛠️ The magic is here: Iterating asynchronously over the live stream of token chunks
-            IAsyncEnumerable<StreamingChatMessageContent> streamingStream =
-                chatService.GetStreamingChatMessageContentsAsync(history, kernel: kernel);
+            Console.WriteLine(response.Content);
+            Console.WriteLine();
 
-            await foreach (StreamingChatMessageContent chunk in streamingStream)
-            {
-                // Note: Some chunks only contain metadata (like tool-calls). 
-                // We must check if the text content is not null before writing.
-                if (chunk.Content is not null)
-                {
-                    Console.Write(chunk.Content);
-                    fullResponse.Append(chunk.Content);
-                }
-            }
-
-            Console.WriteLine("\n"); // Clear line for next turn
-
-            // Critical Step: Save the combined stream output back into history so the next turn remembers it!
-            history.AddAssistantMessage(fullResponse.ToString());
+            history.AddAssistantMessage(response.Content ?? string.Empty);
         }
     }
 }
