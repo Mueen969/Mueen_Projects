@@ -11,33 +11,24 @@ class Program
     static async Task Main(string[] args)
     {
         var builder = Kernel.CreateBuilder();
-
-        // 1. Connect to Ollama (or OpenAI)
         builder.AddOllamaChatCompletion(
             modelId: "llama3.2",
             endpoint: new Uri("http://localhost:11434")
         );
 
-        // 2. Register our C# Plugin into the Kernel container
-        builder.Plugins.AddFromType<DiagnosticsPlugin>("Diagnostics");
-
         Kernel kernel = builder.Build();
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
 
-        // 3. Configure Execution Settings to allow automatic tool invocation
-        var settings = new OllamaPromptExecutionSettings
-        {
-            // Tells SK: If the LLM requests a tool call, run the C# method automatically and feed the result back!
-            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto()
-        };
+        // Initialize our token management middleware
+        var tokenGuard = new TokenGuardService();
+        var budgetManager = new HistoryBudgetManager(tokenGuard, maxTokenBudget: 150); // Tight budget to test purging
 
         var history = new ChatHistory();
-        history.AddSystemMessage("You are an automated DevOps SRE assistant. Use available diagnostic tools to answer user issues.");
+        history.AddSystemMessage("You are an assistant. Answer in 1 short sentence.");
 
         Console.ForegroundColor = ConsoleColor.Blue;
-        Console.WriteLine("System: Local Function Calling initialized. Try asking:");
-        Console.WriteLine(" -> 'Check the server metrics for Production'");
-        Console.WriteLine(" -> 'Production CPU is spiking, please restart the OrderProcessor service'\n");
+        Console.WriteLine("System: Token-Managed Conversation Loop Active.");
+        Console.WriteLine("Token budget set to ~150 tokens. Watch old messages drop when limit is hit!\n");
         Console.ResetColor();
 
         while (true)
@@ -46,27 +37,27 @@ class Program
             Console.Write("You: ");
             Console.ResetColor();
 
-            string? userInput = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(userInput) || userInput.Equals("exit", StringComparison.OrdinalIgnoreCase))
+            string? input = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(input) || input.Equals("exit", StringComparison.OrdinalIgnoreCase))
                 break;
 
-            history.AddUserMessage(userInput);
+            // Step A: Append User Input
+            history.AddUserMessage(input);
+
+            // 🛠️ Step B: Middleware - ENFORCE BUDGET BEFORE MAKING THE API CALL
+            budgetManager.EnforceTokenBudget(history);
 
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.Write("AI: ");
             Console.ResetColor();
 
-            // Execute request with auto-function calling enabled
-            var response = await chatService.GetChatMessageContentAsync(
-                history,
-                executionSettings: settings,
-                kernel: kernel
-            );
-
+            // Step C: Send request over the wire with the guaranteed lean payload
+            var response = await chatService.GetChatMessageContentAsync(history);
             Console.WriteLine(response.Content);
-            Console.WriteLine();
 
+            // Step D: Append AI Output to memory
             history.AddAssistantMessage(response.Content ?? string.Empty);
+            Console.WriteLine();
         }
     }
 }
